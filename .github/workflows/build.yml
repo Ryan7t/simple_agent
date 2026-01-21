@@ -4,7 +4,12 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -64,3 +69,31 @@ jobs:
         with:
           name: bossagent-${{ runner.os }}
           path: electron/dist/**
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package artifacts
+        run: |
+          cd artifacts
+          for dir in *; do
+            if [ -d "$dir" ]; then
+              zip -r "../${dir}.zip" "$dir"
+            fi
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bossagent-Windows.zip
+            bossagent-macOS.zip
+            bossagent-Linux.zip
