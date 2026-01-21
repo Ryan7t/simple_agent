@@ -3,8 +3,9 @@ BossAgent 核心类
 整合所有模块，实现老板 AI 的主要逻辑
 """
 import sys
+import json
 import threading
-from typing import List, Dict
+from typing import List, Dict, Any
 from colorama import Fore, Style
 
 from config import settings
@@ -39,6 +40,13 @@ class BossAgent:
         
         # 初始化任务调度器
         self.scheduler = TaskScheduler(settings.task_state_file)
+
+        # 工具定义与处理器
+        self.tools = self._build_tools()
+        self.tool_handlers = {
+            "set_deadline": self._tool_set_deadline,
+            "clear_deadline": self._tool_clear_deadline
+        }
         
         # 加载文档上下文
         self.document_context = self.doc_loader.load()
@@ -87,24 +95,60 @@ class BossAgent:
         """
         messages = self.build_messages(user_input)
         self.ui.print_agent_prefix()
-        
-        full_response = ""
-        try:
-            for chunk in self.llm.chat_stream(messages):
-                self.ui.print_stream(chunk)
-                full_response += chunk
-        except Exception as e:
-            self.ui.print_error(f"\n流式接收出错: {e}")
-        
-        self.ui.print_newline()
-        
-        # 解析并设置截止时间
-        self._process_deadline(full_response)
-        
+
+        if not self.llm.is_ready:
+            self.ui.print_error("\n错误：未配置有效的 OpenAI API Key，无法进行对话。")
+            self.ui.print_newline()
+            return ""
+
+        tool_response = self.llm.chat(messages, tools=self.tools, tool_choice="auto")
+        if tool_response is None:
+            fallback_messages = messages + [
+                {
+                    "role": "system",
+                    "content": "（系统提示：工具不可用时，请在回复末尾使用【截止时间：N分钟】或【任务完成】标记。）"
+                }
+            ]
+            full_response = self._stream_response(fallback_messages)
+            self._process_deadline(full_response, tool_used=False)
+            return full_response
+
+        assistant_message = tool_response.choices[0].message
+        tool_calls = assistant_message.tool_calls or []
+        tool_used = False
+
+        if tool_calls:
+            tool_used = True
+            assistant_tool_calls = []
+            for call in tool_calls:
+                assistant_tool_calls.append({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments
+                    }
+                })
+            messages.append({
+                "role": "assistant",
+                "content": assistant_message.content or "",
+                "tool_calls": assistant_tool_calls
+            })
+            messages.extend(self._execute_tool_calls(tool_calls))
+            full_response = self._stream_response(messages)
+        else:
+            full_response = assistant_message.content or ""
+            if full_response:
+                self.ui.print_stream(full_response)
+            self.ui.print_newline()
+
+        self._process_deadline(full_response, tool_used=tool_used)
         return full_response
-    
-    def _process_deadline(self, response: str):
-        """从回复中解析截止时间并设置调度器"""
+
+    def _process_deadline(self, response: str, tool_used: bool):
+        """从回复中解析截止时间并设置调度器（工具调用失败时的兜底）"""
+        if tool_used:
+            return
         minutes = self.scheduler.parse_deadline(response)
         if minutes is not None:
             if minutes > 0:
@@ -112,6 +156,98 @@ class BossAgent:
             else:
                 # minutes == 0 表示任务完成
                 self.scheduler.clear_deadline()
+
+    def _build_tools(self) -> List[Dict[str, Any]]:
+        """构建工具定义"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "set_deadline",
+                    "description": "设置任务截止时间（分钟），用于循环催促。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "minutes": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "从现在起的分钟数"
+                            }
+                        },
+                        "required": ["minutes"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "clear_deadline",
+                    "description": "清除当前截止时间，停止循环催促。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False
+                    }
+                }
+            }
+        ]
+
+    def _tool_set_deadline(self, minutes: Any, **_unused: Any) -> str:
+        """工具：设置截止时间"""
+        try:
+            minutes_int = int(minutes)
+        except (TypeError, ValueError):
+            return "设置失败：minutes 参数无效"
+        self.scheduler.set_deadline(minutes_int)
+        return f"已设置截止时间：{minutes_int}分钟"
+
+    def _tool_clear_deadline(self, **_unused: Any) -> str:
+        """工具：清除截止时间"""
+        self.scheduler.clear_deadline()
+        return "截止时间已清除"
+
+    def _execute_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, str]]:
+        """执行工具调用并返回工具消息"""
+        tool_messages: List[Dict[str, str]] = []
+        for call in tool_calls:
+            tool_name = call.function.name
+            args_text = call.function.arguments or "{}"
+            try:
+                args = json.loads(args_text)
+            except json.JSONDecodeError:
+                args = {}
+
+            handler = self.tool_handlers.get(tool_name)
+            if handler is None:
+                result = f"未知工具：{tool_name}"
+            else:
+                try:
+                    if isinstance(args, dict):
+                        result = handler(**args)
+                    else:
+                        result = handler(args)
+                except Exception as e:
+                    result = f"工具执行失败：{e}"
+
+            tool_messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": str(result)
+            })
+        return tool_messages
+
+    def _stream_response(self, messages: List[Dict]) -> str:
+        """流式输出 LLM 回复并返回完整内容"""
+        full_response = ""
+        try:
+            for chunk in self.llm.chat_stream(messages):
+                self.ui.print_stream(chunk)
+                full_response += chunk
+        except Exception as e:
+            self.ui.print_error(f"\n流式接收出错: {e}")
+        self.ui.print_newline()
+        return full_response
     
     def _on_deadline_reached(self):
         """截止时间到达时的回调"""
@@ -192,18 +328,7 @@ class BossAgent:
         Returns:
             用户输入字符串，如果是定时触发则返回 None
         """
-        import time
         import sys
-        
-        # 跨平台输入缓冲区检测
-        if sys.platform == 'win32':
-            import msvcrt
-            def kbhit():
-                return msvcrt.kbhit()
-        else:
-            import select
-            def kbhit():
-                return select.select([sys.stdin], [], [], 0)[0] != []
         
         # 先打印输入提示
         print(f"\n{Fore.BLUE}我的回复 > {Style.RESET_ALL}", end="", flush=True)
@@ -213,25 +338,13 @@ class BossAgent:
         
         def read_input():
             try:
-                lines = []
-                # 读取第一行
-                first_line = input()
-                lines.append(first_line)
-                
-                # 短暂等待，检测是否有更多行在缓冲区中（用户粘贴多行的情况）
-                time.sleep(0.05)  # 50ms 足够检测粘贴操作
-                
-                # 持续读取缓冲区中的剩余行
-                while kbhit():
-                    try:
-                        line = input()
-                        lines.append(line)
-                        time.sleep(0.02)  # 短暂等待检测下一行
-                    except EOFError:
-                        break
-                
-                # 合并所有行
-                input_result[0] = "\n".join(lines)
+                if sys.platform == 'win32':
+                    from ui.terminal import read_all_available_lines_windows
+                    first_line = input()
+                    input_result[0] = read_all_available_lines_windows(first_line)
+                else:
+                    from ui.terminal import read_all_available_lines_unix
+                    input_result[0] = read_all_available_lines_unix()
             except EOFError:
                 input_result[0] = "exit"
             finally:

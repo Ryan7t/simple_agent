@@ -3,7 +3,7 @@ LLM 客户端封装模块
 负责与 OpenAI 兼容 API 交互
 """
 import traceback
-from typing import List, Dict, Generator
+from typing import List, Dict, Generator, Optional, Any
 import httpx
 from openai import OpenAI
 from colorama import Fore, Style
@@ -29,7 +29,41 @@ class LLMClient:
         """检查客户端是否就绪"""
         return self.client is not None
     
-    def chat_stream(self, messages: List[Dict]) -> Generator[str, None, None]:
+    def chat(self, messages: List[Dict], tools: Optional[List[Dict]] = None, tool_choice: Optional[str] = None) -> Optional[Any]:
+        """
+        非流式调用 LLM（支持工具调用）
+        
+        Args:
+            messages: 消息列表
+            tools: 工具定义列表
+            tool_choice: 工具选择策略
+            
+        Returns:
+            LLM 响应对象
+        """
+        if not self.is_ready:
+            print(f"{Fore.RED}错误：未配置有效的 OpenAI API Key，无法进行对话。{Style.RESET_ALL}")
+            return None
+        
+        try:
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.7
+            }
+            if tools is not None:
+                kwargs["tools"] = tools
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
+            return self.client.chat.completions.create(**kwargs)
+        except Exception:
+            error_trace = traceback.format_exc()
+            print(f"\n{Fore.RED}======== LLM 调用错误详情 ========{Style.RESET_ALL}")
+            print(f"{Fore.RED}{error_trace}{Style.RESET_ALL}")
+            print(f"{Fore.RED}=================================={Style.RESET_ALL}")
+            return None
+
+    def chat_stream(self, messages: List[Dict], tools: Optional[List[Dict]] = None, tool_choice: Optional[str] = None) -> Generator[str, None, None]:
         """
         流式调用 LLM 生成回复
         
@@ -44,12 +78,17 @@ class LLMClient:
             return
         
         try:
-            stream = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.7,
-                stream=True
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.7,
+                "stream": True
+            }
+            if tools is not None:
+                kwargs["tools"] = tools
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
+            stream = self.client.chat.completions.create(**kwargs)
             for chunk in stream:
                 if chunk.choices[0].delta.content is not None:
                     yield chunk.choices[0].delta.content
