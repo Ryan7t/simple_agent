@@ -1,0 +1,67 @@
+"""
+文档加载器模块
+负责解析文案目录下的 docx 文件
+"""
+import os
+import glob
+from docx import Document
+from colorama import Fore, Style
+
+
+class DocxLoader:
+    """Docx 文档加载器"""
+    
+    def __init__(self, documents_dir: str):
+        self.documents_dir = documents_dir
+        self._content = None
+    
+    def load(self) -> str:
+        """
+        加载并解析所有 docx 文件
+        
+        Returns:
+            所有文档的文本内容
+        """
+        if self._content is not None:
+            return self._content
+        
+        context_text = ""
+        
+        if not os.path.exists(self.documents_dir):
+            self._content = ""
+            return ""
+        
+        docx_files = glob.glob(os.path.join(self.documents_dir, "*.docx"))
+        
+        if not docx_files:
+            self._content = ""
+            return ""
+        
+        for file_path in docx_files:
+            try:
+                doc = Document(file_path)
+                file_content = []
+                for para in doc.paragraphs:
+                    if para.text.strip():
+                        file_content.append(para.text.strip())
+                
+                if file_content:
+                    filename = os.path.basename(file_path)
+                    context_text += f"\n\n--- 文件名: {filename} ---\n"
+                    context_text += "\n".join(file_content)
+            except Exception as e:
+                print(f"{Fore.YELLOW}无法读取文件 {file_path}: {e}{Style.RESET_ALL}")
+        
+        self._content = context_text
+        return self._content
+    
+    def reload(self) -> str:
+        """强制重新加载文档"""
+        self._content = None
+        return self.load()
+    
+    def get_file_count(self) -> int:
+        """获取文档数量"""
+        if not os.path.exists(self.documents_dir):
+            return 0
+        return len(glob.glob(os.path.join(self.documents_dir, "*.docx")))
