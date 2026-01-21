@@ -4,6 +4,7 @@ LLM 客户端封装模块
 """
 import traceback
 from typing import List, Dict, Generator
+import httpx
 from openai import OpenAI
 from colorama import Fore, Style
 
@@ -16,7 +17,10 @@ class LLMClient:
         self.client = None
         
         if api_key:
-            self.client = OpenAI(api_key=api_key, base_url=base_url)
+            # 显式禁用代理，忽略系统环境变量中的代理配置 (HTTP_PROXY, HTTPS_PROXY 等)
+            # 这可以解决因系统配置了不兼容的代理协议 (如 socks://) 而导致的启动失败问题
+            http_client = httpx.Client(proxy=None)
+            self.client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
         else:
             print(f"{Fore.RED}警告：未配置有效的 OPENAI_API_KEY。请检查 .env。{Style.RESET_ALL}")
     

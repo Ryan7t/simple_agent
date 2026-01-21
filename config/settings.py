@@ -28,6 +28,7 @@ class Settings:
         
         # 数据文件
         self.memory_file = os.path.join(self.data_dir, "conversation_history.json")
+        self.task_state_file = os.path.join(self.data_dir, "task_state.json")
         self.documents_dir = os.path.join(self.data_dir, "文案")
         
         # 提示词文件

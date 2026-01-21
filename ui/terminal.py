@@ -2,6 +2,9 @@
 终端用户界面模块
 负责艺术字显示、彩色输出、用户输入处理
 """
+import sys
+import time
+import msvcrt
 from colorama import Fore, Style, init
 from pyfiglet import Figlet
 
@@ -50,9 +53,31 @@ class TerminalUI:
         print(f"{Fore.CYAN}{message}{Style.RESET_ALL}")
     
     def get_user_input(self) -> str:
-        """获取用户输入"""
-        return input(f"\n{Fore.BLUE}我的回复 > {Style.RESET_ALL}")
+        """
+        获取用户输入，支持多行粘贴
+        当用户粘贴多行内容时，会自动合并为一条消息
+        """
+        lines = []
+        first_line = input(f"\n{Fore.BLUE}我的回复 > {Style.RESET_ALL}")
+        lines.append(first_line)
+        
+        # 短暂等待，检测是否有更多行在缓冲区中（用户粘贴多行的情况）
+        time.sleep(0.05)  # 50ms 足够检测粘贴操作
+        
+        # 持续读取缓冲区中的剩余行
+        while msvcrt.kbhit():
+            try:
+                # 读取一行
+                line = input()
+                lines.append(line)
+                time.sleep(0.02)  # 短暂等待检测下一行
+            except EOFError:
+                break
+        
+        # 合并所有行
+        return "\n".join(lines)
     
     def print_goodbye(self):
         """打印告别消息"""
         print(Fore.RED + "再见！期待下次相遇～" + Style.RESET_ALL)
+
