@@ -25,6 +25,7 @@ const chatPage = document.getElementById("chatPage");
 const promptsPage = document.getElementById("promptsPage");
 const messageMap = new Map();
 let polling = false;
+let uiBusy = false;
 const startupDeadline =
   Date.now() + (Number(window.bossApi.startupTimeoutMs) || 30000);
 
@@ -43,6 +44,21 @@ function setStatus(text, ok = true) {
   statusEl.textContent = text;
   statusEl.style.borderColor = ok ? "rgba(27, 29, 31, 0.12)" : "rgba(207, 63, 46, 0.6)";
   statusEl.style.color = ok ? "#1b1d1f" : "#cf3f2e";
+}
+
+function setUiBusy(busy) {
+  uiBusy = busy;
+  document.body.classList.toggle("ui-busy", busy);
+  const controls = document.querySelectorAll("button, input, textarea, select");
+  controls.forEach(control => {
+    if (control === messageInput) {
+      return;
+    }
+    control.disabled = busy;
+  });
+  if (messageInput) {
+    messageInput.disabled = false;
+  }
 }
 
 function isStartingUp() {
@@ -139,6 +155,22 @@ function appendToolEvent(event) {
   createMessage("debug", message);
 }
 
+function parseToolArgs(toolCall) {
+  if (!toolCall || !toolCall.function) {
+    return {};
+  }
+  const argsText = toolCall.function.arguments;
+  if (!argsText) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(argsText);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (err) {
+    return {};
+  }
+}
+
 function handleStreamEvent(event, fallbackMessageId) {
   if (!event) {
     return;
@@ -159,6 +191,11 @@ function handleStreamEvent(event, fallbackMessageId) {
   if (event.type === "error") {
     showError(messageId, event.content || "未知错误");
     setStatus("未连接", false);
+    setUiBusy(false);
+    return;
+  }
+  if (event.type === "scheduler_update" && event.data) {
+    renderScheduler(event.data);
     return;
   }
   if (event.type === "done") {
@@ -169,6 +206,7 @@ function handleStreamEvent(event, fallbackMessageId) {
       }
     }
     setStatus("已连接");
+    setUiBusy(false);
   }
 }
 
@@ -216,6 +254,9 @@ async function streamChat(message, messageId) {
       // ignore trailing fragments
     }
   }
+  if (uiBusy) {
+    setUiBusy(false);
+  }
 }
 
 function generateMessageId() {
@@ -231,6 +272,10 @@ function showPromptsPage() {
   }
   chatPage.classList.add("hidden");
   promptsPage.classList.remove("hidden");
+
+  // UI Logic: Update Sidebar Active State
+  openPromptsBtn.classList.add("active");
+  backToChatBtn.classList.remove("active");
 }
 
 function showChatPage() {
@@ -271,9 +316,43 @@ async function loadHistory() {
   const data = await apiFetch("/history");
   messageMap.clear();
   messagesEl.innerHTML = "";
+
   data.items.forEach(item => {
-    appendMessage("user", item.user_input);
-    appendMessage("assistant", item.response);
+    const toolCallMap = new Map();
+    // 新格式：完整消息列表
+    if (item.messages && Array.isArray(item.messages)) {
+      item.messages.forEach(msg => {
+        if (msg.role === "user") {
+          // 过滤掉系统触发的消息（以括号开头）
+          if (!msg.content.startsWith("（") && !msg.content.startsWith("(")) {
+            appendMessage("user", msg.content);
+          }
+        } else if (msg.role === "assistant") {
+          appendMessage("assistant", msg.content);
+          if (Array.isArray(msg.tool_calls)) {
+            msg.tool_calls.forEach(call => {
+              if (call && call.id) {
+                toolCallMap.set(call.id, call);
+              }
+            });
+          }
+        } else if (msg.role === "tool") {
+          const toolCall = toolCallMap.get(msg.tool_call_id);
+          const name = toolCall?.function?.name || msg.tool_call_id || "unknown_tool";
+          const args = parseToolArgs(toolCall);
+          const result = msg.content || "";
+          appendToolEvent({ name, args, result });
+        }
+      });
+    }
+    // 旧格式兼容：user_input + response
+    else if (item.user_input && item.response) {
+      // 过滤掉系统触发的消息
+      if (!item.user_input.startsWith("（") && !item.user_input.startsWith("(")) {
+        appendMessage("user", item.user_input);
+      }
+      appendMessage("assistant", item.response);
+    }
   });
 }
 
@@ -300,34 +379,38 @@ async function loadPrompts() {
   contextPromptInput.value = data.context_intro || "";
 }
 
+function renderScheduler(data) {
+  if (!data.active) {
+    timerStatus.textContent = "未设置";
+    timerRemaining.textContent = "--:--";
+    timerMeta.textContent = "";
+    timerFill.style.width = "0%";
+    return;
+  }
+
+  timerStatus.textContent = "进行中";
+  timerRemaining.textContent = formatDuration(data.remaining_seconds);
+  if (data.deadline) {
+    const deadline = data.deadline.replace("T", " ").split(".")[0];
+    timerMeta.textContent = `截止时间 ${deadline}`;
+  } else {
+    timerMeta.textContent = "";
+  }
+
+  if (data.interval_minutes) {
+    const total = data.interval_minutes * 60;
+    const remaining = Math.max(0, data.remaining_seconds || 0);
+    const percent = Math.min(100, Math.max(0, ((total - remaining) / total) * 100));
+    timerFill.style.width = `${percent}%`;
+  } else {
+    timerFill.style.width = "0%";
+  }
+}
+
 async function loadScheduler() {
   try {
     const data = await apiFetch("/scheduler");
-    if (!data.active) {
-      timerStatus.textContent = "未设置";
-      timerRemaining.textContent = "--:--";
-      timerMeta.textContent = "";
-      timerFill.style.width = "0%";
-      return;
-    }
-
-    timerStatus.textContent = "进行中";
-    timerRemaining.textContent = formatDuration(data.remaining_seconds);
-    if (data.deadline) {
-      const deadline = data.deadline.replace("T", " ").split(".")[0];
-      timerMeta.textContent = `截止时间 ${deadline}`;
-    } else {
-      timerMeta.textContent = "";
-    }
-
-    if (data.interval_minutes) {
-      const total = data.interval_minutes * 60;
-      const remaining = Math.max(0, data.remaining_seconds || 0);
-      const percent = Math.min(100, Math.max(0, ((total - remaining) / total) * 100));
-      timerFill.style.width = `${percent}%`;
-    } else {
-      timerFill.style.width = "0%";
-    }
+    renderScheduler(data);
   } catch (err) {
     timerStatus.textContent = "未连接";
     timerRemaining.textContent = "--:--";
@@ -337,6 +420,9 @@ async function loadScheduler() {
 }
 
 async function sendMessage() {
+  if (uiBusy) {
+    return;
+  }
   const message = messageInput.value;
   if (!message.trim()) {
     return;
@@ -351,23 +437,30 @@ async function sendMessage() {
 
   messageInput.focus();
   setStatus("思考中...");
+  setUiBusy(true);
   try {
     await streamChat(message, messageId);
   } catch (err) {
     showError(messageId, String(err));
     setStatus("未连接", false);
+    setUiBusy(false);
   }
 }
 
 async function sendNudge() {
+  if (uiBusy) {
+    return;
+  }
   const messageId = generateMessageId();
   ensureAssistantMessage(messageId);
   setStatus("思考中...");
+  setUiBusy(true);
   try {
     await streamChat("", messageId);
   } catch (err) {
     showError(messageId, String(err));
     setStatus("未连接", false);
+    setUiBusy(false);
   }
 }
 
@@ -475,16 +568,12 @@ saveConfigBtn.addEventListener("click", saveConfig);
 savePromptsBtn.addEventListener("click", savePrompts);
 clearHistoryBtn.addEventListener("click", clearHistory);
 openPromptsBtn.addEventListener("click", async () => {
+  showPromptsPage();
   try {
     await loadPrompts();
   } catch (err) {
     setStatus("未连接", false);
   }
-  showPromptsPage();
-
-  // UI Logic: Update Sidebar Active State
-  openPromptsBtn.classList.add("active");
-  backToChatBtn.classList.remove("active");
 });
 backToChatBtn.addEventListener("click", showChatPage);
 

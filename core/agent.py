@@ -77,15 +77,31 @@ class BossAgent:
         if self.document_context is None:
             self.document_context = self.doc_loader.load()
         system_content = self.prompt_loader.build_system_content(self.document_context)
+        scheduler_status = self.scheduler.get_status()
+        if scheduler_status.get("active"):
+            remaining = max(0, int(scheduler_status.get("remaining_seconds", 0) // 60))
+            deadline = scheduler_status.get("deadline") or ""
+            system_content += "\n\n当前系统状态：定时器已设置。"
+            system_content += f" 剩余约 {remaining} 分钟。"
+            if deadline:
+                system_content += f" 截止时间 {deadline}。"
+            system_content += " 重要：再次调用 set_deadline 会覆盖已有定时器，除非用户明确要求修改，否则不要重复调用。"
+        else:
+            system_content += "\n\n当前系统状态：定时器未设置。"
         
         messages = [
             {"role": "system", "content": system_content}
         ]
         
-        # 添加历史对话
+        # 添加历史对话（阶段二：使用完整消息格式）
         for record in self.memory.get_all():
-            messages.append({"role": "user", "content": record["user_input"]})
-            messages.append({"role": "assistant", "content": record["response"]})
+            # 新格式：直接展开完整消息列表
+            if "messages" in record:
+                messages.extend(record["messages"])
+            # 向后兼容旧格式（如果存在）
+            elif "user_input" in record and "response" in record:
+                messages.append({"role": "user", "content": record["user_input"]})
+                messages.append({"role": "assistant", "content": record["response"]})
         
         # 添加当前用户输入
         messages.append({"role": "user", "content": user_input})
@@ -97,7 +113,7 @@ class BossAgent:
         user_input: str,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         message_id: Optional[str] = None
-    ) -> str:
+    ) -> Tuple[str, List[Dict]]:
         """
         生成回复并流式打印
         
@@ -105,7 +121,7 @@ class BossAgent:
             user_input: 用户输入
             
         Returns:
-            完整的回复内容
+            完整的回复内容 和 本轮对话的完整消息列表（用于保存到 Memory）
         """
         messages = self.build_messages(user_input)
         self.ui.print_agent_prefix()
@@ -116,7 +132,12 @@ class BossAgent:
                 event_callback({"type": "error", "content": error_text, "message_id": message_id})
             self.ui.print_error(f"\n{error_text}")
             self.ui.print_newline()
-            return error_text
+            # 返回错误信息和简单的对话消息
+            conversation_messages = [
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": error_text}
+            ]
+            return error_text, conversation_messages
 
         try:
             full_response, tool_calls = self._stream_with_tools(
@@ -130,30 +151,84 @@ class BossAgent:
                 event_callback({"type": "error", "content": error_trace, "message_id": message_id})
             self.ui.print_error(f"\n{error_trace}")
             self.ui.print_newline()
-            return error_trace
+            # 返回错误跟踪和简单的对话消息
+            conversation_messages = [
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": error_trace}
+            ]
+            return error_trace, conversation_messages
 
         tool_used = False
+        # 收集本轮对话的完整消息（阶段二：保存完整消息格式）
+        conversation_messages = [
+            {"role": "user", "content": user_input}
+        ]
 
         if tool_calls:
             tool_used = True
-            messages.append({
+            # 添加 assistant 消息（包含 tool_calls）
+            assistant_message = {
                 "role": "assistant",
                 "content": full_response,
                 "tool_calls": tool_calls
-            })
-            messages.extend(self._execute_tool_calls(tool_calls, event_callback=event_callback, message_id=message_id))
-            full_response += self._stream_response(messages, event_callback=event_callback, message_id=message_id)
-        else:
-            full_response, dsml_used, dsml_events = self._apply_dsml_tool_calls(full_response)
+            }
+            conversation_messages.append(assistant_message)
+            messages.append(assistant_message)
+
+            # 执行工具并添加 tool 消息
+            tool_messages = self._execute_tool_calls(tool_calls, event_callback=event_callback, message_id=message_id)
+            conversation_messages.extend(tool_messages)
+            messages.extend(tool_messages)
+
+            # 获取第二轮回复
+            second_response = self._stream_response(messages, event_callback=event_callback, message_id=message_id)
+            cleaned_second, dsml_used, dsml_calls, dsml_tool_messages = self._handle_dsml_tool_calls(
+                second_response,
+                event_callback=event_callback,
+                message_id=message_id
+            )
             if dsml_used:
                 tool_used = True
                 if event_callback:
-                    for event in dsml_events:
-                        event_callback({"type": "tool", "message_id": message_id, **event})
+                    event_callback({
+                        "type": "replace",
+                        "content": full_response + cleaned_second,
+                        "message_id": message_id
+                    })
+                assistant_entry = {"role": "assistant", "content": cleaned_second}
+                if dsml_calls:
+                    assistant_entry["tool_calls"] = dsml_calls
+                conversation_messages.append(assistant_entry)
+                conversation_messages.extend(dsml_tool_messages)
+                full_response += cleaned_second
+            else:
+                # 添加第二轮 assistant 消息
+                conversation_messages.append({
+                    "role": "assistant",
+                    "content": second_response
+                })
+                full_response += second_response
+        else:
+            full_response, dsml_used, dsml_calls, dsml_tool_messages = self._handle_dsml_tool_calls(
+                full_response,
+                event_callback=event_callback,
+                message_id=message_id
+            )
+            if dsml_used:
+                tool_used = True
+                if event_callback:
                     event_callback({"type": "replace", "content": full_response, "message_id": message_id})
 
+            # 添加 assistant 消息
+            assistant_entry = {"role": "assistant", "content": full_response}
+            if dsml_calls:
+                assistant_entry["tool_calls"] = dsml_calls
+            conversation_messages.append(assistant_entry)
+            if dsml_tool_messages:
+                conversation_messages.extend(dsml_tool_messages)
+
         self._process_deadline(full_response, tool_used=tool_used)
-        return full_response
+        return full_response, conversation_messages
 
     def _process_deadline(self, response: str, tool_used: bool):
         """从回复中解析截止时间并设置调度器（工具调用失败时的兜底）"""
@@ -174,7 +249,7 @@ class BossAgent:
                 "type": "function",
                 "function": {
                     "name": "set_deadline",
-                    "description": "设置任务截止时间（分钟），用于循环催促。",
+                    "description": "设置任务截止时间（分钟），用于循环催促。重复调用会覆盖已有定时器。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -209,8 +284,16 @@ class BossAgent:
             minutes_int = int(minutes)
         except (TypeError, ValueError):
             return "设置失败：minutes 参数无效"
-        self.scheduler.set_deadline(minutes_int)
-        return f"已设置截止时间：{minutes_int}分钟"
+        
+        # 检查是否已有定时器（阶段一：明确告知覆盖行为）
+        status = self.scheduler.get_status()
+        if status.get("active"):
+            old_remaining = status.get("remaining_seconds", 0) // 60
+            self.scheduler.set_deadline(minutes_int)
+            return f"已覆盖之前的定时器（原剩余 {old_remaining} 分钟），新的截止时间：{minutes_int}分钟"
+        else:
+            self.scheduler.set_deadline(minutes_int)
+            return f"已设置截止时间：{minutes_int}分钟"
 
     def _tool_clear_deadline(self, **_unused: Any) -> str:
         """工具：清除截止时间"""
@@ -260,6 +343,14 @@ class BossAgent:
                     "args": args,
                     "result": str(result)
                 })
+                
+                # 如果是调度器相关工具，主动推送状态变更事件
+                if tool_name in ["set_deadline", "clear_deadline"]:
+                    event_callback({
+                        "type": "scheduler_update",
+                        "message_id": message_id,
+                        "data": self.scheduler.get_status()
+                    })
 
             tool_messages.append({
                 "role": "tool",
@@ -268,49 +359,93 @@ class BossAgent:
             })
         return tool_messages
 
-    def _apply_dsml_tool_calls(self, content: str) -> Tuple[str, bool, List[Dict[str, Any]]]:
-        """解析并执行 DSML 工具调用内容，同时清理可见输出"""
+    def _parse_dsml_args(self, body: str) -> Dict[str, Any]:
+        """解析 DSML 参数"""
+        body = (body or "").strip()
+        if not body:
+            return {}
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        params: Dict[str, Any] = {}
+        param_pattern = re.compile(
+            r"<[\|｜]DSML[\|｜]parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</[\|｜]DSML[\|｜]parameter>",
+            re.S
+        )
+        for name, value in param_pattern.findall(body):
+            value_text = value.strip()
+            if not value_text:
+                params[name] = ""
+                continue
+            try:
+                params[name] = json.loads(value_text)
+            except json.JSONDecodeError:
+                params[name] = value_text
+        return params
+
+    def _extract_dsml_tool_calls(self, content: str) -> List[Dict[str, Any]]:
+        """从 DSML 内容中提取工具调用"""
         if not content:
-            return content, False, []
-        pattern = re.compile(r"<[\|｜]DSML[\|｜]invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)</[\|｜]DSML[\|｜]invoke>", re.S)
+            return []
+        pattern = re.compile(
+            r"<[\|｜]DSML[\|｜]invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)</[\|｜]DSML[\|｜]invoke>",
+            re.S
+        )
         matches = pattern.findall(content)
         if not matches:
-            return content, False, []
+            return []
+        tool_calls: List[Dict[str, Any]] = []
+        for index, (name, body) in enumerate(matches):
+            args = self._parse_dsml_args(body)
+            tool_calls.append({
+                "id": f"dsml_{index}_{name}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(args, ensure_ascii=False)
+                }
+            })
+        return tool_calls
 
-        tool_used = False
-        tool_events: List[Dict[str, Any]] = []
-        for name, body in matches:
-            args_text = body.strip()
-            if args_text:
-                try:
-                    args = json.loads(args_text)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = {}
-            handler = self.tool_handlers.get(name)
-            if handler:
-                try:
-                    if isinstance(args, dict):
-                        result = handler(**args)
-                    else:
-                        result = handler(args)
-                    tool_used = True
-                    tool_events.append({
-                        "name": name,
-                        "args": args,
-                        "result": str(result)
-                    })
-                except Exception:
-                    tool_events.append({
-                        "name": name,
-                        "args": args,
-                        "result": "工具执行失败"
-                    })
-
-        cleaned = re.sub(r"<[\|｜]DSML[\|｜]function_calls>.*?</[\|｜]DSML[\|｜]function_calls>", "", content, flags=re.S)
+    def _strip_dsml_content(self, content: str) -> str:
+        cleaned = re.sub(
+            r"<[\|｜]DSML[\|｜]function_calls>.*?</[\|｜]DSML[\|｜]function_calls>",
+            "",
+            content,
+            flags=re.S
+        )
+        cleaned = re.sub(
+            r"<[\|｜]DSML[\|｜]invoke\b.*?</[\|｜]DSML[\|｜]invoke>",
+            "",
+            cleaned,
+            flags=re.S
+        )
         cleaned = re.sub(r"</?[\|｜]DSML[\|｜][^>]*>", "", cleaned)
-        return cleaned.strip(), tool_used, tool_events
+        return cleaned.strip()
+
+    def _handle_dsml_tool_calls(
+        self,
+        content: str,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ) -> Tuple[str, bool, List[Dict[str, Any]], List[Dict[str, str]]]:
+        """解析 DSML 工具调用并执行，同时清理可见输出"""
+        if not content:
+            return content, False, [], []
+        tool_calls = self._extract_dsml_tool_calls(content)
+        if not tool_calls:
+            return content, False, [], []
+        cleaned = self._strip_dsml_content(content)
+        tool_messages = self._execute_tool_calls(
+            tool_calls,
+            event_callback=event_callback,
+            message_id=message_id
+        )
+        return cleaned, True, tool_calls, tool_messages
 
     def _stream_with_tools(
         self,
@@ -395,8 +530,8 @@ class BossAgent:
         """处理首次启动的开场白"""
         if self.memory.is_empty():
             init_input = "（系统自动触发：用户已上线。当前没有任何历史对话记录，这是全新的一天。请直接询问用户今天的工作计划：写自然选题还是做商单？不要追问昨天的任务，因为没有昨天的记录。）"
-            response = self.generate_response(init_input, event_callback=event_callback, message_id=message_id)
-            self.memory.add("（用户上线）", response)
+            response, conversation_messages = self.generate_response(init_input, event_callback=event_callback, message_id=message_id)
+            self.memory.add(conversation_messages)
             return response
         return ""
     
@@ -408,8 +543,8 @@ class BossAgent:
         """处理主动追问（空输入或定时触发）"""
         time_info = self.prompt_loader.get_time_info()
         proactive_input = f"（系统自动触发：用户请求你主动追问。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。请根据历史对话上下文和当前时间，主动询问用户的工作进度。比如：如果之前在讨论选题，就问选题想好了没；如果在改稿，就问改得怎么样了；如果时间过了很久还没进展，就催一催。用老板的语气说话。）"
-        response = self.generate_response(proactive_input, event_callback=event_callback, message_id=message_id)
-        self.memory.add("（主动追问）", response)
+        response, conversation_messages = self.generate_response(proactive_input, event_callback=event_callback, message_id=message_id)
+        self.memory.add(conversation_messages)
         return response
     
     def handle_auto_followup(
@@ -420,8 +555,8 @@ class BossAgent:
         """处理定时自动触发的追问"""
         time_info = self.prompt_loader.get_time_info()
         auto_input = f"（系统自动触发：任务截止时间已到。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。之前你给用户布置了任务并设定了截止时间，现在时间到了。请根据历史对话上下文，催促用户汇报任务进度。如果用户还没完成，问他卡在哪里了需要什么帮助。用老板的语气说话，直接但不粗暴。）"
-        response = self.generate_response(auto_input, event_callback=event_callback, message_id=message_id)
-        self.memory.add("（定时催促）", response)
+        response, conversation_messages = self.generate_response(auto_input, event_callback=event_callback, message_id=message_id)
+        self.memory.add(conversation_messages)
         return response
     
     def handle_user_input(
@@ -431,8 +566,8 @@ class BossAgent:
         message_id: Optional[str] = None
     ):
         """处理正常用户输入"""
-        response = self.generate_response(user_input, event_callback=event_callback, message_id=message_id)
-        self.memory.add(user_input, response)
+        response, conversation_messages = self.generate_response(user_input, event_callback=event_callback, message_id=message_id)
+        self.memory.add(conversation_messages)
         return response
     
     def run(self):

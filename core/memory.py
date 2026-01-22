@@ -41,12 +41,11 @@ class Memory:
         except Exception as e:
             print(f"保存记忆文件失败: {e}")
     
-    def add(self, user_input: str, response: str):
-        """添加一条对话记录"""
+    def add(self, messages: List[Dict]):
+        """添加一条对话记录（完整消息列表）"""
         self.history.append({
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "user_input": user_input,
-            "response": response
+            "messages": messages  # 保存完整消息列表（包括 user、assistant、tool_calls、tool）
         })
         self.save()
     

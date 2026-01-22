@@ -173,8 +173,17 @@ body {
   display: none;
 }
 
+body.ui-busy button:disabled,
+body.ui-busy input:disabled,
+body.ui-busy textarea:disabled,
+body.ui-busy select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .stage-header {
   height: var(--header-height);
+  flex-shrink: 0;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
@@ -627,7 +636,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .field-block {
