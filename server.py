@@ -9,6 +9,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -24,6 +25,7 @@ class AgentService:
     def __init__(self):
         self._lock = threading.Lock()
         self._events = deque()
+        self._events_lock = threading.Lock()
         self._agent = None
         self._start_agent()
 
@@ -40,11 +42,15 @@ class AgentService:
         with self._lock:
             response = self._agent.handle_auto_followup()
         if response:
-            self._events.append({
+            self._push_event({
                 "type": "auto_followup",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "message": response
             })
+
+    def _push_event(self, event: dict):
+        with self._events_lock:
+            self._events.append(event)
 
     def get_history(self):
         with self._lock:
@@ -52,24 +58,35 @@ class AgentService:
                 self._agent.handle_startup()
             return self._agent.memory.get_all()
 
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, message_id: str = None) -> dict:
+        message_id = message_id or str(uuid.uuid4())
+
+        def event_callback(event: dict):
+            if "message_id" not in event:
+                event["message_id"] = message_id
+            self._push_event(event)
+
         with self._lock:
             if message is None:
                 message = ""
             if not message.strip():
-                return self._agent.handle_proactive_followup()
-            return self._agent.handle_user_input(message)
+                response = self._agent.handle_proactive_followup(event_callback=event_callback, message_id=message_id)
+            else:
+                response = self._agent.handle_user_input(message, event_callback=event_callback, message_id=message_id)
+        return {"message_id": message_id, "response": response}
 
     def clear_history(self):
         with self._lock:
             self._agent.memory.clear()
             self._agent.scheduler.clear_deadline()
-            self._events.clear()
+            with self._events_lock:
+                self._events.clear()
 
     def get_events(self):
         events = []
-        while self._events:
-            events.append(self._events.popleft())
+        with self._events_lock:
+            while self._events:
+                events.append(self._events.popleft())
         return events
 
     def get_config(self):
@@ -103,6 +120,43 @@ class AgentService:
             "files": files,
             "count": len(files)
         }
+
+    def _read_prompt(self, path: str) -> str:
+        if not path or not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return ""
+
+    def get_prompts(self) -> dict:
+        return {
+            "system_prompt": self._read_prompt(settings.system_prompt_file),
+            "context_intro": self._read_prompt(settings.context_intro_file)
+        }
+
+    def update_prompts(self, updates: dict) -> dict:
+        os.makedirs(settings.prompt_overrides_dir, exist_ok=True)
+        mapping = {
+            "system_prompt": ("system_prompt.txt", "system_prompt_file"),
+            "context_intro": ("context_intro.txt", "context_intro_file")
+        }
+        for key, (filename, attr) in mapping.items():
+            if key not in updates:
+                continue
+            value = updates.get(key, "")
+            override_path = os.path.join(settings.prompt_overrides_dir, filename)
+            try:
+                with open(override_path, "w", encoding="utf-8") as f:
+                    f.write(value)
+                setattr(settings, attr, override_path)
+            except Exception:
+                pass
+
+        with self._lock:
+            self._start_agent()
+        return self.get_prompts()
 
 
 def make_handler(service: AgentService):
@@ -155,6 +209,9 @@ def make_handler(service: AgentService):
             if path == "/scheduler":
                 self._send_json(200, service.get_scheduler_status())
                 return
+            if path == "/prompts":
+                self._send_json(200, service.get_prompts())
+                return
             self._send_json(404, {"error": "not_found"})
 
         def do_POST(self):
@@ -162,13 +219,19 @@ def make_handler(service: AgentService):
             if path == "/chat":
                 data = self._read_json()
                 message = data.get("message", "")
-                response = service.chat(message)
-                self._send_json(200, {"response": response})
+                message_id = data.get("message_id")
+                payload = service.chat(message, message_id=message_id)
+                self._send_json(200, payload)
                 return
             if path == "/config":
                 data = self._read_json()
                 config = service.update_config(data)
                 self._send_json(200, config)
+                return
+            if path == "/prompts":
+                data = self._read_json()
+                prompts = service.update_prompts(data)
+                self._send_json(200, prompts)
                 return
             if path == "/history/clear":
                 service.clear_history()

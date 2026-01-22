@@ -1,82 +1,164 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>BossAgent</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div class="app">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">BossAgent 桌面版</p>
-          <h1>赛博司马特控制台</h1>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BossAgent Pro</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div class="app-container">
+
+    <!-- 1. 左侧导航栏 (Primary Navigation) -->
+    <nav class="sidebar-nav">
+      <div class="nav-top">
+        <div class="brand-icon">B</div>
+      </div>
+      <div class="nav-items">
+        <button id="backToChatBtn" class="nav-item active" title="交互终端">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+        </button>
+        <button id="openPromptsBtn" class="nav-item" title="人格矩阵">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path
+              d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
+            </path>
+          </svg>
+        </button>
+      </div>
+      <div class="nav-bottom">
+        <!-- 这里可以放用户头像或设置 -->
+      </div>
+    </nav>
+
+    <!-- 2. 中间舞台 (Main Stage) -->
+    <main class="stage">
+
+      <!-- View A: Chat Page -->
+      <div id="chatPage" class="view-layer">
+        <header class="stage-header">
+          <div class="header-title">交互终端</div>
+          <!-- Timer Module -->
+          <div class="timer-pill">
+            <span id="timerStatus" class="timer-state">待机</span>
+            <span class="divider"></span>
+            <span id="timerRemaining" class="timer-time">--:--</span>
+            <div class="timer-track">
+              <div id="timerFill" class="timer-bar"></div>
+            </div>
+            <span id="timerMeta" class="timer-details"></span>
+          </div>
+        </header>
+
+        <div id="messages" class="chat-viewport">
+          <!-- Messages injected here -->
         </div>
-        <div class="status" id="status">正在连接...</div>
-      </header>
 
-      <main class="layout">
-        <section class="chat">
-          <div class="chat-header">
-            <div class="chat-title">
-              <h2>对话记录</h2>
-              <div class="timer-inline">
-                <span class="timer-status" id="timerStatus">未设置</span>
-                <span class="timer-remaining" id="timerRemaining">--:--</span>
-                <div class="timer-bar">
-                  <div class="timer-fill" id="timerFill"></div>
-                </div>
-                <span class="timer-meta" id="timerMeta"></span>
-              </div>
-            </div>
-            <div class="chat-actions">
-              <button class="ghost" id="nudgeBtn">主动催促</button>
-              <button class="ghost" id="clearHistory">清空对话</button>
-            </div>
+        <div class="composer-container">
+          <div class="composer-wrapper">
+            <textarea id="messageInput" placeholder="输入指令... (Enter 发送, Shift+Enter 换行)"></textarea>
+            <button id="sendBtn" class="action-btn primary-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
           </div>
-          <div class="messages" id="messages"></div>
-          <div class="composer">
-            <textarea id="messageInput" rows="4" placeholder="输入或粘贴内容..."></textarea>
-            <button id="sendBtn">发送</button>
-          </div>
-        </section>
+        </div>
+      </div>
 
-        <aside class="panel">
-          <div class="panel-section">
-            <h3>模型配置</h3>
-            <label>
-              模型
-              <input id="modelInput" type="text" placeholder="模型名称" />
-            </label>
-            <label>
-              接口地址
-              <input id="baseUrlInput" type="text" placeholder="https://..." />
-            </label>
-            <label>
-              API 密钥
-              <input id="apiKeyInput" type="password" placeholder="sk-..." />
-            </label>
+      <!-- View B: Prompts Page -->
+      <div id="promptsPage" class="view-layer hidden">
+        <header class="stage-header">
+          <div class="header-title">人格矩阵配置</div>
+          <button id="savePromptsBtn" class="action-btn">保存变更</button>
+        </header>
+        <div class="prompts-editor">
+          <div class="field-block">
+            <label>系统核心指令 (System Prompt)</label>
+            <textarea id="systemPromptInput" placeholder="定义 Agent 的核心行为逻辑..."></textarea>
+          </div>
+          <div class="field-block">
+            <label>动态上下文注入 (Context)</label>
+            <textarea id="contextPromptInput" placeholder="注入当前环境、时间或任务状态..."></textarea>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- 3. 右侧属性面板 (Inspector) -->
+    <aside class="inspector">
+      <div class="inspector-header">
+        <span>控制台属性</span>
+        <div id="status" class="status-badge">未连接</div>
+      </div>
+
+      <div class="inspector-content">
+        <!-- 快捷操作区 -->
+        <div class="inspector-section">
+          <label class="section-label">快捷指令</label>
+          <div class="actions-grid">
+            <button id="nudgeBtn" class="secondary-btn">
+              <span>⚡ 主动催促</span>
+            </button>
+            <button id="clearHistory" class="secondary-btn">
+              <span>🗑️ 清空记录</span>
+            </button>
+          </div>
+        </div>
+
+        <hr class="divider-line" />
+
+        <!-- 连接配置 -->
+        <div class="inspector-section">
+          <label class="section-label">API 连接</label>
+
+          <div class="input-row">
+            <label>模型标识</label>
+            <input id="modelInput" type="text" placeholder="例如: gpt-4" />
           </div>
 
-          <div class="panel-section">
-            <h3>文案目录</h3>
-            <label>
-              目录
-              <div class="row">
-                <input id="docsDirInput" type="text" placeholder="选择文件夹" />
-                <button class="ghost" id="pickDirBtn">选择</button>
-              </div>
-            </label>
-            <div class="doc-list" id="docList"></div>
+          <div class="input-row">
+            <label>接口地址</label>
+            <input id="baseUrlInput" type="text" placeholder="https://api..." />
           </div>
 
-          <div class="panel-section">
-            <button id="saveConfigBtn">保存配置</button>
+          <div class="input-row">
+            <label>API 密钥</label>
+            <input id="apiKeyInput" type="password" placeholder="sk-..." />
           </div>
-        </aside>
-      </main>
-    </div>
-    <script src="app.js"></script>
-  </body>
+        </div>
+
+        <hr class="divider-line" />
+
+        <!-- 文件挂载 -->
+        <div class="inspector-section">
+          <label class="section-label">知识库挂载</label>
+          <div class="input-row has-button">
+            <input id="docsDirInput" type="text" placeholder="未选择目录" readonly />
+            <button id="pickDirBtn" class="icon-only-btn">📂</button>
+          </div>
+          <div id="docList" class="file-tree">
+            <!-- 文件列表 -->
+          </div>
+        </div>
+      </div>
+
+      <div class="inspector-footer">
+        <button id="saveConfigBtn" class="full-width-btn">保存并重连</button>
+      </div>
+    </aside>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+
 </html>

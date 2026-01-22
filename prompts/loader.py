@@ -9,9 +9,9 @@ from colorama import Fore, Style
 
 class PromptLoader:
     """提示词加载器"""
-    
+
     DEFAULT_SYSTEM_PROMPT = "你是一个智能助手，请根据提供的上下文回答用户的问题。"
-    
+
     def __init__(self, system_prompt_file: str, context_intro_file: str):
         self.system_prompt_file = system_prompt_file
         self.context_intro_file = context_intro_file
@@ -53,6 +53,7 @@ class PromptLoader:
         
         self._context_intro = ""
         return self._context_intro
+
     
     @staticmethod
     def get_time_info() -> dict:
@@ -96,7 +97,7 @@ class PromptLoader:
         context_intro = self.load_context_intro()
         if context_intro:
             content += f"【背景设定/引导】\n{context_intro}\n\n"
-        
+
         if document_context:
             content += f"【参考文档内容】\n{document_context}"
         

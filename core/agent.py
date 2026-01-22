@@ -6,7 +6,8 @@ import sys
 import json
 import re
 import threading
-from typing import List, Dict, Any, Tuple
+import traceback
+from typing import List, Dict, Any, Tuple, Optional, Callable
 from colorama import Fore, Style
 
 from config import settings
@@ -84,7 +85,12 @@ class BossAgent:
         
         return messages
     
-    def generate_response(self, user_input: str) -> str:
+    def generate_response(
+        self,
+        user_input: str,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ) -> str:
         """
         生成回复并流式打印
         
@@ -98,53 +104,46 @@ class BossAgent:
         self.ui.print_agent_prefix()
 
         if not self.llm.is_ready:
-            self.ui.print_error("\n错误：未配置有效的 OpenAI API Key，无法进行对话。")
+            error_text = "错误：未配置有效的 OpenAI API Key，无法进行对话。"
+            if event_callback:
+                event_callback({"type": "error", "content": error_text, "message_id": message_id})
+            self.ui.print_error(f"\n{error_text}")
             self.ui.print_newline()
-            return ""
+            return error_text
 
-        tool_response = self.llm.chat(messages, tools=self.tools, tool_choice="auto")
-        if tool_response is None:
-            fallback_messages = messages + [
-                {
-                    "role": "system",
-                    "content": "（系统提示：工具不可用时，请在回复末尾使用【截止时间：N分钟】或【任务完成】标记。）"
-                }
-            ]
-            full_response = self._stream_response(fallback_messages)
-            self._process_deadline(full_response, tool_used=False)
-            return full_response
+        try:
+            full_response, tool_calls = self._stream_with_tools(
+                messages,
+                event_callback=event_callback,
+                message_id=message_id
+            )
+        except Exception:
+            error_trace = traceback.format_exc()
+            if event_callback:
+                event_callback({"type": "error", "content": error_trace, "message_id": message_id})
+            self.ui.print_error(f"\n{error_trace}")
+            self.ui.print_newline()
+            return error_trace
 
-        assistant_message = tool_response.choices[0].message
-        tool_calls = assistant_message.tool_calls or []
         tool_used = False
 
         if tool_calls:
             tool_used = True
-            assistant_tool_calls = []
-            for call in tool_calls:
-                assistant_tool_calls.append({
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.function.name,
-                        "arguments": call.function.arguments
-                    }
-                })
             messages.append({
                 "role": "assistant",
-                "content": assistant_message.content or "",
-                "tool_calls": assistant_tool_calls
+                "content": full_response,
+                "tool_calls": tool_calls
             })
-            messages.extend(self._execute_tool_calls(tool_calls))
-            full_response = self._stream_response(messages)
+            messages.extend(self._execute_tool_calls(tool_calls, event_callback=event_callback, message_id=message_id))
+            full_response += self._stream_response(messages, event_callback=event_callback, message_id=message_id)
         else:
-            full_response = assistant_message.content or ""
-            full_response, dsml_used = self._apply_dsml_tool_calls(full_response)
+            full_response, dsml_used, dsml_events = self._apply_dsml_tool_calls(full_response)
             if dsml_used:
                 tool_used = True
-            if full_response:
-                self.ui.print_stream(full_response)
-            self.ui.print_newline()
+                if event_callback:
+                    for event in dsml_events:
+                        event_callback({"type": "tool", "message_id": message_id, **event})
+                    event_callback({"type": "replace", "content": full_response, "message_id": message_id})
 
         self._process_deadline(full_response, tool_used=tool_used)
         return full_response
@@ -211,12 +210,24 @@ class BossAgent:
         self.scheduler.clear_deadline()
         return "截止时间已清除"
 
-    def _execute_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, str]]:
+    def _execute_tool_calls(
+        self,
+        tool_calls: List[Any],
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ) -> List[Dict[str, str]]:
         """执行工具调用并返回工具消息"""
         tool_messages: List[Dict[str, str]] = []
         for call in tool_calls:
-            tool_name = call.function.name
-            args_text = call.function.arguments or "{}"
+            if isinstance(call, dict):
+                function = call.get("function", {}) or {}
+                tool_name = function.get("name") or ""
+                args_text = function.get("arguments") or "{}"
+                call_id = call.get("id")
+            else:
+                tool_name = call.function.name
+                args_text = call.function.arguments or "{}"
+                call_id = call.id
             try:
                 args = json.loads(args_text)
             except json.JSONDecodeError:
@@ -234,23 +245,33 @@ class BossAgent:
                 except Exception as e:
                     result = f"工具执行失败：{e}"
 
+            if event_callback:
+                event_callback({
+                    "type": "tool",
+                    "message_id": message_id,
+                    "name": tool_name,
+                    "args": args,
+                    "result": str(result)
+                })
+
             tool_messages.append({
                 "role": "tool",
-                "tool_call_id": call.id,
+                "tool_call_id": call_id or tool_name or "unknown_tool",
                 "content": str(result)
             })
         return tool_messages
 
-    def _apply_dsml_tool_calls(self, content: str) -> Tuple[str, bool]:
+    def _apply_dsml_tool_calls(self, content: str) -> Tuple[str, bool, List[Dict[str, Any]]]:
         """解析并执行 DSML 工具调用内容，同时清理可见输出"""
         if not content:
-            return content, False
+            return content, False, []
         pattern = re.compile(r"<[\|｜]DSML[\|｜]invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)</[\|｜]DSML[\|｜]invoke>", re.S)
         matches = pattern.findall(content)
         if not matches:
-            return content, False
+            return content, False, []
 
         tool_used = False
+        tool_events: List[Dict[str, Any]] = []
         for name, body in matches:
             args_text = body.strip()
             if args_text:
@@ -264,26 +285,94 @@ class BossAgent:
             if handler:
                 try:
                     if isinstance(args, dict):
-                        handler(**args)
+                        result = handler(**args)
                     else:
-                        handler(args)
+                        result = handler(args)
                     tool_used = True
+                    tool_events.append({
+                        "name": name,
+                        "args": args,
+                        "result": str(result)
+                    })
                 except Exception:
-                    pass
+                    tool_events.append({
+                        "name": name,
+                        "args": args,
+                        "result": "工具执行失败"
+                    })
 
         cleaned = re.sub(r"<[\|｜]DSML[\|｜]function_calls>.*?</[\|｜]DSML[\|｜]function_calls>", "", content, flags=re.S)
         cleaned = re.sub(r"</?[\|｜]DSML[\|｜][^>]*>", "", cleaned)
-        return cleaned.strip(), tool_used
+        return cleaned.strip(), tool_used, tool_events
 
-    def _stream_response(self, messages: List[Dict]) -> str:
+    def _stream_with_tools(
+        self,
+        messages: List[Dict],
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """流式请求首轮回复并解析工具调用"""
+        full_response = ""
+        tool_call_map: Dict[int, Dict[str, Any]] = {}
+
+        for chunk in self.llm.chat_stream_chunks(messages, tools=self.tools, tool_choice="auto"):
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if delta.content:
+                if event_callback:
+                    event_callback({"type": "chunk", "content": delta.content, "message_id": message_id})
+                self.ui.print_stream(delta.content)
+                full_response += delta.content
+
+            tool_calls_delta = getattr(delta, "tool_calls", None)
+            if tool_calls_delta:
+                for tool_call in tool_calls_delta:
+                    index = tool_call.index
+                    entry = tool_call_map.get(index)
+                    if entry is None:
+                        entry = {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": "",
+                                "arguments": ""
+                            }
+                        }
+                        tool_call_map[index] = entry
+                    if tool_call.id:
+                        entry["id"] = tool_call.id
+                    if tool_call.function:
+                        if tool_call.function.name:
+                            entry["function"]["name"] = tool_call.function.name
+                        if tool_call.function.arguments:
+                            entry["function"]["arguments"] += tool_call.function.arguments
+
+        tool_calls = [tool_call_map[index] for index in sorted(tool_call_map.keys())]
+        if not tool_calls:
+            self.ui.print_newline()
+        return full_response, tool_calls
+
+    def _stream_response(
+        self,
+        messages: List[Dict],
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ) -> str:
         """流式输出 LLM 回复并返回完整内容"""
         full_response = ""
         try:
             for chunk in self.llm.chat_stream(messages):
+                if event_callback:
+                    event_callback({"type": "chunk", "content": chunk, "message_id": message_id})
                 self.ui.print_stream(chunk)
                 full_response += chunk
-        except Exception as e:
-            self.ui.print_error(f"\n流式接收出错: {e}")
+        except Exception:
+            error_trace = traceback.format_exc()
+            if event_callback:
+                event_callback({"type": "error", "content": error_trace, "message_id": message_id})
+            self.ui.print_error(f"\n{error_trace}")
+            full_response = error_trace
         self.ui.print_newline()
         return full_response
     
@@ -291,34 +380,51 @@ class BossAgent:
         """截止时间到达时的回调"""
         self._auto_followup_triggered.set()
     
-    def handle_startup(self):
+    def handle_startup(
+        self,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ):
         """处理首次启动的开场白"""
         if self.memory.is_empty():
             init_input = "（系统自动触发：用户已上线。当前没有任何历史对话记录，这是全新的一天。请直接询问用户今天的工作计划：写自然选题还是做商单？不要追问昨天的任务，因为没有昨天的记录。）"
-            response = self.generate_response(init_input)
+            response = self.generate_response(init_input, event_callback=event_callback, message_id=message_id)
             self.memory.add("（用户上线）", response)
             return response
         return ""
     
-    def handle_proactive_followup(self):
+    def handle_proactive_followup(
+        self,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ):
         """处理主动追问（空输入或定时触发）"""
         time_info = self.prompt_loader.get_time_info()
         proactive_input = f"（系统自动触发：用户请求你主动追问。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。请根据历史对话上下文和当前时间，主动询问用户的工作进度。比如：如果之前在讨论选题，就问选题想好了没；如果在改稿，就问改得怎么样了；如果时间过了很久还没进展，就催一催。用老板的语气说话。）"
-        response = self.generate_response(proactive_input)
+        response = self.generate_response(proactive_input, event_callback=event_callback, message_id=message_id)
         self.memory.add("（主动追问）", response)
         return response
     
-    def handle_auto_followup(self):
+    def handle_auto_followup(
+        self,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ):
         """处理定时自动触发的追问"""
         time_info = self.prompt_loader.get_time_info()
         auto_input = f"（系统自动触发：任务截止时间已到。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。之前你给用户布置了任务并设定了截止时间，现在时间到了。请根据历史对话上下文，催促用户汇报任务进度。如果用户还没完成，问他卡在哪里了需要什么帮助。用老板的语气说话，直接但不粗暴。）"
-        response = self.generate_response(auto_input)
+        response = self.generate_response(auto_input, event_callback=event_callback, message_id=message_id)
         self.memory.add("（定时催促）", response)
         return response
     
-    def handle_user_input(self, user_input: str):
+    def handle_user_input(
+        self,
+        user_input: str,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        message_id: Optional[str] = None
+    ):
         """处理正常用户输入"""
-        response = self.generate_response(user_input)
+        response = self.generate_response(user_input, event_callback=event_callback, message_id=message_id)
         self.memory.add(user_input, response)
         return response
     

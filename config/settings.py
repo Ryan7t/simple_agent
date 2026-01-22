@@ -22,6 +22,7 @@ class Settings:
         data_dir_override = os.getenv("BOSS_DATA_DIR")
         self.data_dir = data_dir_override or os.path.join(self.base_dir, "data")
         self.prompts_dir = os.path.join(self.base_dir, "prompts", "templates")
+        self.prompt_overrides_dir = os.path.join(self.data_dir, "prompts")
         self.runtime_config_file = os.path.join(self.data_dir, "runtime_config.json")
 
         # LLM 配置
@@ -38,11 +39,18 @@ class Settings:
         self.documents_dir = os.path.join(self.data_dir, "文案")
 
         # 提示词文件
-        self.system_prompt_file = os.path.join(self.prompts_dir, "system_prompt.txt")
-        self.context_intro_file = os.path.join(self.prompts_dir, "context_intro.txt")
+        self.system_prompt_file = self._resolve_prompt_file("system_prompt.txt")
+        self.context_intro_file = self._resolve_prompt_file("context_intro.txt")
 
         # 运行时配置覆盖
         self._apply_runtime_overrides()
+
+    def _resolve_prompt_file(self, filename: str) -> str:
+        """优先使用用户数据目录中的提示词文件"""
+        override_path = os.path.join(self.prompt_overrides_dir, filename)
+        if os.path.exists(override_path):
+            return override_path
+        return os.path.join(self.prompts_dir, filename)
     
     def _load_env(self):
         """加载环境变量"""

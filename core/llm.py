@@ -2,7 +2,6 @@
 LLM 客户端封装模块
 负责与 OpenAI 兼容 API 交互
 """
-import traceback
 from typing import List, Dict, Generator, Optional, Any
 import httpx
 from openai import OpenAI
@@ -29,7 +28,7 @@ class LLMClient:
         """检查客户端是否就绪"""
         return self.client is not None
     
-    def chat(self, messages: List[Dict], tools: Optional[List[Dict]] = None, tool_choice: Optional[str] = None) -> Optional[Any]:
+    def chat(self, messages: List[Dict], tools: Optional[List[Dict]] = None, tool_choice: Optional[str] = None) -> Any:
         """
         非流式调用 LLM（支持工具调用）
         
@@ -42,26 +41,18 @@ class LLMClient:
             LLM 响应对象
         """
         if not self.is_ready:
-            print(f"{Fore.RED}错误：未配置有效的 OpenAI API Key，无法进行对话。{Style.RESET_ALL}")
-            return None
-        
-        try:
-            kwargs = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": 0.7
-            }
-            if tools is not None:
-                kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
-            return self.client.chat.completions.create(**kwargs)
-        except Exception:
-            error_trace = traceback.format_exc()
-            print(f"\n{Fore.RED}======== LLM 调用错误详情 ========{Style.RESET_ALL}")
-            print(f"{Fore.RED}{error_trace}{Style.RESET_ALL}")
-            print(f"{Fore.RED}=================================={Style.RESET_ALL}")
-            return None
+            raise RuntimeError("错误：未配置有效的 OpenAI API Key，无法进行对话。")
+
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7
+        }
+        if tools is not None:
+            kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        return self.client.chat.completions.create(**kwargs)
 
     def chat_stream(self, messages: List[Dict], tools: Optional[List[Dict]] = None, tool_choice: Optional[str] = None) -> Generator[str, None, None]:
         """
@@ -73,28 +64,32 @@ class LLMClient:
         Yields:
             生成的文本片段
         """
+        for chunk in self.chat_stream_chunks(messages, tools=tools, tool_choice=tool_choice):
+            if chunk.choices[0].delta.content is not None:
+                yield chunk.choices[0].delta.content
+
+    def chat_stream_chunks(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        tool_choice: Optional[str] = None
+    ) -> Generator[Any, None, None]:
+        """
+        流式调用 LLM，返回原始 chunk 对象（用于处理工具调用）
+        """
         if not self.is_ready:
-            yield "错误：未配置有效的 OpenAI API Key，无法进行对话。"
-            return
-        
-        try:
-            kwargs = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": 0.7,
-                "stream": True
-            }
-            if tools is not None:
-                kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
-            stream = self.client.chat.completions.create(**kwargs)
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    yield chunk.choices[0].delta.content
-        except Exception:
-            error_trace = traceback.format_exc()
-            print(f"\n{Fore.RED}======== LLM 调用错误详情 ========{Style.RESET_ALL}")
-            print(f"{Fore.RED}{error_trace}{Style.RESET_ALL}")
-            print(f"{Fore.RED}=================================={Style.RESET_ALL}")
-            yield "调用 LLM 失败，请查看上方红色错误日志。"
+            raise RuntimeError("错误：未配置有效的 OpenAI API Key，无法进行对话。")
+
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "stream": True
+        }
+        if tools is not None:
+            kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        stream = self.client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            yield chunk
