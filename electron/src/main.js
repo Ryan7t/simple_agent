@@ -1,11 +1,19 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const { spawn } = require("child_process");
+const fs = require("fs");
+const net = require("net");
 const path = require("path");
 const http = require("http");
 
 const DEFAULT_PORT = 8765;
+const BACKEND_STARTUP_SOFT_TIMEOUT_MS = Number(process.env.BOSS_BACKEND_SOFT_TIMEOUT_MS || 15000);
+const BACKEND_STARTUP_TIMEOUT_MS = Number(process.env.BOSS_BACKEND_TIMEOUT_MS || 30000);
 let backendProcess = null;
 let mainWindow = null;
+let backendLogPath = null;
+let backendLogStream = null;
+let backendStartError = null;
+let backendExitInfo = null;
 
 function resolveBackendCommand(port) {
   if (app.isPackaged) {
@@ -19,15 +27,55 @@ function resolveBackendCommand(port) {
   return { command: pythonCmd, args: [serverScript, "--host", "127.0.0.1", "--port", String(port)] };
 }
 
+function initBackendLog() {
+  const logDir = app.getPath("userData");
+  fs.mkdirSync(logDir, { recursive: true });
+  backendLogPath = path.join(logDir, "backend.log");
+  backendLogStream = fs.createWriteStream(backendLogPath, { flags: "w" });
+  backendLogStream.write(`[${new Date().toISOString()}] Backend startup log\n`);
+}
+
+function writeBackendLog(message) {
+  if (!backendLogStream) {
+    return;
+  }
+  backendLogStream.write(`${message}\n`);
+}
+
 function startBackend(port) {
   const { command, args } = resolveBackendCommand(port);
+  backendStartError = null;
+  backendExitInfo = null;
+  initBackendLog();
+  writeBackendLog(`command: ${command} ${args.join(" ")}`);
   backendProcess = spawn(command, args, {
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     env: {
       ...process.env,
       BOSS_DATA_DIR: app.getPath("userData")
     }
+  });
+  writeBackendLog(`data_dir: ${app.getPath("userData")}`);
+  writeBackendLog(`port: ${port}`);
+
+  if (backendProcess.stdout) {
+    backendProcess.stdout.on("data", data => {
+      backendLogStream?.write(data);
+    });
+  }
+  if (backendProcess.stderr) {
+    backendProcess.stderr.on("data", data => {
+      backendLogStream?.write(data);
+    });
+  }
+  backendProcess.on("error", err => {
+    backendStartError = err;
+    writeBackendLog(`[error] ${err.stack || err.message || String(err)}`);
+  });
+  backendProcess.on("exit", (code, signal) => {
+    backendExitInfo = { code, signal };
+    writeBackendLog(`[exit] code=${code ?? "null"} signal=${signal ?? "null"}`);
   });
 }
 
@@ -40,13 +88,26 @@ function stopBackend() {
   } catch (err) {
     // ignore shutdown errors
   }
+  if (backendLogStream) {
+    backendLogStream.end();
+  }
   backendProcess = null;
+  backendLogStream = null;
 }
 
-function waitForBackend(port, timeoutMs = 15000) {
+function waitForBackend(port, timeoutMs = BACKEND_STARTUP_TIMEOUT_MS) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const check = () => {
+      if (backendStartError) {
+        reject(backendStartError);
+        return;
+      }
+      if (backendExitInfo) {
+        const { code, signal } = backendExitInfo;
+        reject(new Error(`Backend exited (code=${code ?? "null"}, signal=${signal ?? "null"})`));
+        return;
+      }
       const req = http.get(`http://127.0.0.1:${port}/health`, res => {
         if (res.statusCode === 200) {
           res.resume();
@@ -60,15 +121,59 @@ function waitForBackend(port, timeoutMs = 15000) {
     };
 
     const retry = () => {
-      if (Date.now() - start > timeoutMs) {
+      const elapsed = Date.now() - start;
+      const softTimeout = Math.min(BACKEND_STARTUP_SOFT_TIMEOUT_MS, timeoutMs);
+      if (elapsed > timeoutMs) {
         reject(new Error("Backend did not respond in time."));
         return;
       }
-      setTimeout(check, 300);
+      setTimeout(check, elapsed > softTimeout ? 500 : 300);
     };
 
     check();
   });
+}
+
+function readBackendLogTail(maxBytes = 6000) {
+  if (!backendLogPath || !fs.existsSync(backendLogPath)) {
+    return "";
+  }
+  try {
+    const stats = fs.statSync(backendLogPath);
+    const size = stats.size;
+    if (size <= maxBytes) {
+      return fs.readFileSync(backendLogPath, "utf-8");
+    }
+    const fd = fs.openSync(backendLogPath, "r");
+    const buffer = Buffer.alloc(maxBytes);
+    fs.readSync(fd, buffer, 0, maxBytes, size - maxBytes);
+    fs.closeSync(fd);
+    return buffer.toString("utf-8");
+  } catch (err) {
+    return "";
+  }
+}
+
+async function findAvailablePort(preferredPort) {
+  const tryListen = port =>
+    new Promise((resolve, reject) => {
+      const server = net.createServer();
+      server.once("error", reject);
+      server.listen(port, "127.0.0.1", () => {
+        const address = server.address();
+        const actualPort = typeof address === "object" ? address.port : port;
+        server.close(() => resolve(actualPort));
+      });
+    });
+
+  if (preferredPort) {
+    try {
+      return await tryListen(preferredPort);
+    } catch (err) {
+      writeBackendLog(`[warn] preferred port ${preferredPort} unavailable: ${err.code || err.message}`);
+    }
+  }
+  return tryListen(0);
 }
 
 function createMenu() {
@@ -166,14 +271,33 @@ function createWindow(port) {
 }
 
 app.whenReady().then(async () => {
-  const port = Number(process.env.BOSS_BACKEND_PORT || DEFAULT_PORT);
+  const preferredPort = Number(process.env.BOSS_BACKEND_PORT || DEFAULT_PORT);
+  let port = preferredPort;
+  try {
+    port = await findAvailablePort(preferredPort);
+  } catch (err) {
+    dialog.showErrorBox("Backend Error", `无法获取可用端口: ${err.message}`);
+    app.quit();
+    return;
+  }
+  process.env.BOSS_STARTUP_TIMEOUT_MS = String(BACKEND_STARTUP_TIMEOUT_MS);
   startBackend(port);
+  createWindow(port);
 
   try {
     await waitForBackend(port);
-    createWindow(port);
   } catch (err) {
-    dialog.showErrorBox("Backend Error", err.message);
+    if (backendLogStream) {
+      backendLogStream.end();
+      backendLogStream = null;
+    }
+    const logTail = readBackendLogTail();
+    const logHint = backendLogPath ? `\n\n日志文件: ${backendLogPath}` : "";
+    const details = logTail ? `\n\n日志内容:\n${logTail}` : "";
+    dialog.showErrorBox("Backend Error", `${err.message}${logHint}${details}`);
+    if (mainWindow) {
+      mainWindow.close();
+    }
     app.quit();
   }
 });

@@ -7,7 +7,7 @@ import json
 import re
 import threading
 import traceback
-from typing import List, Dict, Any, Tuple, Optional, Callable
+from typing import List, Dict, Any, Tuple, Optional, Callable, TYPE_CHECKING
 from colorama import Fore, Style
 
 from config import settings
@@ -16,13 +16,14 @@ from core.llm import LLMClient
 from core.scheduler import TaskScheduler
 from prompts import PromptLoader
 from context import DocxLoader
-from ui import TerminalUI
+if TYPE_CHECKING:
+    from ui.terminal import TerminalUI
 
 
 class BossAgent:
     """赛博司马特 - AI 老板 Agent"""
     
-    def __init__(self, ui: TerminalUI = None):
+    def __init__(self, ui: Optional["TerminalUI"] = None):
         # 初始化配置
         self.name = settings.agent_name
         
@@ -38,7 +39,11 @@ class BossAgent:
             context_intro_file=settings.context_intro_file
         )
         self.doc_loader = DocxLoader(settings.documents_dir)
-        self.ui = ui or TerminalUI(self.name)
+        if ui is None:
+            from ui.terminal import TerminalUI
+            self.ui = TerminalUI(self.name)
+        else:
+            self.ui = ui
         
         # 初始化任务调度器
         self.scheduler = TaskScheduler(settings.task_state_file)
@@ -50,8 +55,8 @@ class BossAgent:
             "clear_deadline": self._tool_clear_deadline
         }
         
-        # 加载文档上下文
-        self.document_context = self.doc_loader.load()
+        # 文档上下文延迟加载，避免启动阻塞
+        self.document_context = None
         
         # 用于非阻塞输入的同步机制
         self._input_ready = threading.Event()
@@ -68,7 +73,9 @@ class BossAgent:
         Returns:
             消息列表
         """
-        # 获取系统提示词内容
+        # 获取系统提示词内容（按需加载文档上下文）
+        if self.document_context is None:
+            self.document_context = self.doc_loader.load()
         system_content = self.prompt_loader.build_system_content(self.document_context)
         
         messages = [

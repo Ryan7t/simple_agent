@@ -10,6 +10,7 @@ import os
 import threading
 import time
 import uuid
+import traceback
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -74,6 +75,24 @@ class AgentService:
             else:
                 response = self._agent.handle_user_input(message, event_callback=event_callback, message_id=message_id)
         return {"message_id": message_id, "response": response}
+
+    def chat_stream(self, message: str, send_event, message_id: str = None) -> str:
+        message_id = message_id or str(uuid.uuid4())
+
+        def event_callback(event: dict):
+            if "message_id" not in event:
+                event["message_id"] = message_id
+            send_event(event)
+
+        with self._lock:
+            if message is None:
+                message = ""
+            if not message.strip():
+                response = self._agent.handle_proactive_followup(event_callback=event_callback, message_id=message_id)
+            else:
+                response = self._agent.handle_user_input(message, event_callback=event_callback, message_id=message_id)
+        send_event({"type": "done", "message_id": message_id, "response": response})
+        return message_id
 
     def clear_history(self):
         with self._lock:
@@ -222,6 +241,34 @@ def make_handler(service: AgentService):
                 message_id = data.get("message_id")
                 payload = service.chat(message, message_id=message_id)
                 self._send_json(200, payload)
+                return
+            if path == "/chat/stream":
+                data = self._read_json()
+                message = data.get("message", "")
+                message_id = data.get("message_id")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.end_headers()
+
+                def send_event(event: dict):
+                    try:
+                        payload = json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
+                        self.wfile.write(payload)
+                        self.wfile.flush()
+                    except BrokenPipeError:
+                        return
+                    except Exception:
+                        return
+
+                try:
+                    service.chat_stream(message, send_event=send_event, message_id=message_id)
+                except Exception:
+                    send_event({"type": "error", "content": traceback.format_exc()})
                 return
             if path == "/config":
                 data = self._read_json()

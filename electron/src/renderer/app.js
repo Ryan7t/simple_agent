@@ -25,6 +25,8 @@ const chatPage = document.getElementById("chatPage");
 const promptsPage = document.getElementById("promptsPage");
 const messageMap = new Map();
 let polling = false;
+const startupDeadline =
+  Date.now() + (Number(window.bossApi.startupTimeoutMs) || 30000);
 
 async function apiFetch(path, options = {}) {
   const response = await fetch(`${apiBase}${path}`, {
@@ -41,6 +43,10 @@ function setStatus(text, ok = true) {
   statusEl.textContent = text;
   statusEl.style.borderColor = ok ? "rgba(27, 29, 31, 0.12)" : "rgba(207, 63, 46, 0.6)";
   statusEl.style.color = ok ? "#1b1d1f" : "#cf3f2e";
+}
+
+function isStartingUp() {
+  return Date.now() < startupDeadline;
 }
 
 function createMessage(role, text, options = {}) {
@@ -131,6 +137,85 @@ function appendToolEvent(event) {
   const resultText = event.result ? String(event.result) : "";
   const message = `工具调用 ${name}(${argsText})\n${resultText}`;
   createMessage("debug", message);
+}
+
+function handleStreamEvent(event, fallbackMessageId) {
+  if (!event) {
+    return;
+  }
+  const messageId = event.message_id || fallbackMessageId;
+  if (event.type === "chunk") {
+    appendChunk(messageId, event.content || "");
+    return;
+  }
+  if (event.type === "replace") {
+    replaceMessage(messageId, event.content || "");
+    return;
+  }
+  if (event.type === "tool") {
+    appendToolEvent(event);
+    return;
+  }
+  if (event.type === "error") {
+    showError(messageId, event.content || "未知错误");
+    setStatus("未连接", false);
+    return;
+  }
+  if (event.type === "done") {
+    if (event.response) {
+      const bubble = messageMap.get(messageId);
+      if (bubble && !bubble.textContent) {
+        replaceMessage(messageId, event.response);
+      }
+    }
+    setStatus("已连接");
+  }
+}
+
+async function streamChat(message, messageId) {
+  const response = await fetch(`${apiBase}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, message_id: messageId })
+  });
+  if (!response.ok) {
+    throw new Error(`请求失败: ${response.status}`);
+  }
+  if (!response.body) {
+    const data = await response.json();
+    handleStreamEvent({ type: "done", message_id: data.message_id || messageId, response: data.response }, messageId);
+    return;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    lines.forEach(line => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return;
+      }
+      try {
+        handleStreamEvent(JSON.parse(trimmed), messageId);
+      } catch (err) {
+        // ignore malformed fragments
+      }
+    });
+  }
+  if (buffer.trim()) {
+    try {
+      handleStreamEvent(JSON.parse(buffer.trim()), messageId);
+    } catch (err) {
+      // ignore trailing fragments
+    }
+  }
 }
 
 function generateMessageId() {
@@ -260,26 +345,14 @@ async function sendMessage() {
   appendMessage("user", message);
   ensureAssistantMessage(messageId);
   messageInput.value = "";
+
+  // Reset input height immediately after sending
+  autoResizeInput.call(messageInput);
+
   messageInput.focus();
   setStatus("思考中...");
   try {
-    const data = await apiFetch("/chat", {
-      method: "POST",
-      body: JSON.stringify({ message, message_id: messageId })
-    });
-    if (data.message_id && data.message_id !== messageId) {
-      const bubble = messageMap.get(messageId);
-      if (bubble) {
-        messageMap.delete(messageId);
-        bubble.dataset.messageId = data.message_id;
-        messageMap.set(data.message_id, bubble);
-      }
-    }
-    const bubble = messageMap.get(data.message_id || messageId);
-    if (bubble && !bubble.textContent) {
-      replaceMessage(data.message_id || messageId, data.response || "");
-    }
-    setStatus("已连接");
+    await streamChat(message, messageId);
   } catch (err) {
     showError(messageId, String(err));
     setStatus("未连接", false);
@@ -291,23 +364,7 @@ async function sendNudge() {
   ensureAssistantMessage(messageId);
   setStatus("思考中...");
   try {
-    const data = await apiFetch("/chat", {
-      method: "POST",
-      body: JSON.stringify({ message: "", message_id: messageId })
-    });
-    if (data.message_id && data.message_id !== messageId) {
-      const bubble = messageMap.get(messageId);
-      if (bubble) {
-        messageMap.delete(messageId);
-        bubble.dataset.messageId = data.message_id;
-        messageMap.set(data.message_id, bubble);
-      }
-    }
-    const bubble = messageMap.get(data.message_id || messageId);
-    if (bubble && !bubble.textContent) {
-      replaceMessage(data.message_id || messageId, data.response || "");
-    }
-    setStatus("已连接");
+    await streamChat("", messageId);
   } catch (err) {
     showError(messageId, String(err));
     setStatus("未连接", false);
@@ -395,7 +452,11 @@ async function pollEvents() {
     }
     await loadScheduler();
   } catch (err) {
-    setStatus("未连接", false);
+    if (isStartingUp()) {
+      setStatus("后端启动中...", true);
+    } else {
+      setStatus("未连接", false);
+    }
   } finally {
     polling = false;
   }
@@ -407,8 +468,6 @@ messageInput.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     sendMessage();
-    // Reset height after send
-    messageInput.style.height = 'auto';
   }
 });
 
@@ -437,6 +496,7 @@ pickDirBtn.addEventListener("click", async () => {
 });
 
 async function init() {
+  setStatus("后端启动中...", true);
   try {
     await loadConfig();
     await loadPrompts();
@@ -445,7 +505,11 @@ async function init() {
     await loadScheduler();
     setStatus("已连接");
   } catch (err) {
-    setStatus("未连接", false);
+    if (isStartingUp()) {
+      setStatus("后端启动中...", true);
+    } else {
+      setStatus("未连接", false);
+    }
   }
   setInterval(pollEvents, 500);
 }
