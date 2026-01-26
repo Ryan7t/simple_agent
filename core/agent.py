@@ -529,7 +529,7 @@ class BossAgent:
     ):
         """处理首次启动的开场白"""
         if self.memory.is_empty():
-            init_input = "（系统自动触发：用户已上线。当前没有任何历史对话记录，这是全新的一天。请直接询问用户今天的工作计划：写自然选题还是做商单？不要追问昨天的任务，因为没有昨天的记录。）"
+            init_input = "（系统自动触发：用户已上线。当前没有任何历史对话记录，这是全新的一天。直接开门见山问今天的工作计划：写自然选题还是做商单？语气要直接有力，不给犹豫空间，像老板布置任务一样，不要客气。）"
             response, conversation_messages = self.generate_response(init_input, event_callback=event_callback, message_id=message_id)
             self.memory.add(conversation_messages)
             return response
@@ -542,7 +542,7 @@ class BossAgent:
     ):
         """处理主动追问（空输入或定时触发）"""
         time_info = self.prompt_loader.get_time_info()
-        proactive_input = f"（系统自动触发：用户请求你主动追问。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。请根据历史对话上下文和当前时间，主动询问用户的工作进度。比如：如果之前在讨论选题，就问选题想好了没；如果在改稿，就问改得怎么样了；如果时间过了很久还没进展，就催一催。用老板的语气说话。）"
+        proactive_input = f"（系统自动触发：用户请求你主动追问。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。请根据历史对话上下文和当前时间，用严厉的语气催促用户汇报工作进度。如果之前在讨论选题，就直接质问选题想好了没有；如果在改稿，就追问改得怎么样了；如果时间过了很久还没进展，就骂他拖延、摸鱼。用老板训斥员工的语气说话，要凶狠一点，别客气，让他感受到压力。）"
         response, conversation_messages = self.generate_response(proactive_input, event_callback=event_callback, message_id=message_id)
         self.memory.add(conversation_messages)
         return response
@@ -554,7 +554,7 @@ class BossAgent:
     ):
         """处理定时自动触发的追问"""
         time_info = self.prompt_loader.get_time_info()
-        auto_input = f"（系统自动触发：任务截止时间已到。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。之前你给用户布置了任务并设定了截止时间，现在时间到了。请根据历史对话上下文，催促用户汇报任务进度。如果用户还没完成，问他卡在哪里了需要什么帮助。用老板的语气说话，直接但不粗暴。）"
+        auto_input = f"（系统自动触发：任务截止时间已到，用户还没有任何回复。当前时间是 {time_info['time_str']} {time_info['weekday']}，现在是{time_info['time_period']}。之前你给用户布置了任务并设定了截止时间，现在时间到了他还没交付成果。请用非常严厉凶狠的语气骂他、训斥他。像老板发现员工拖延任务时那样愤怒地质问：时间到了东西呢？在干什么？是不是又在摸鱼？要直接骂出来，让他感受到你的怒火和不满。如果他还没完成，除了骂他，还要追问到底卡在哪里了，是能力不行还是态度有问题。语气要凶，要狠，要让他意识到拖延的严重性。）"
         response, conversation_messages = self.generate_response(auto_input, event_callback=event_callback, message_id=message_id)
         self.memory.add(conversation_messages)
         return response
