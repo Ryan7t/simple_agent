@@ -119,7 +119,8 @@ class TaskScheduler:
     def _reset_deadline(self):
         """重置截止时间到下一个周期（用于循环催促）"""
         if self.interval_minutes:
-            self.deadline = datetime.now() + timedelta(minutes=self.interval_minutes)
+            # 基于上一个截止时间累加，避免漂移
+            self.deadline = self.deadline + timedelta(minutes=self.interval_minutes)
             self._save_state()
     
     def clear_deadline(self):

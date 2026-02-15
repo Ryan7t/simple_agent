@@ -90,8 +90,11 @@ class Memory:
         if target_index is None or target_index < 0 or target_index >= len(messages):
             return False
         messages[target_index]["content"] = content
-        if role == "user" and target_index == 0:
-            record["request_input"] = content
+        # 查找第一条 user 消息，更新 request_input
+        for idx, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                record["request_input"] = msg.get("content", "")
+                break
         self.save()
         return True
 

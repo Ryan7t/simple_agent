@@ -79,6 +79,7 @@ class BossAgent:
         
         # 文档上下文延迟加载，避免启动阻塞
         self.document_context = None
+        self.document_context_hash = None
         
         # 用于非阻塞输入的同步机制
         self._input_ready = threading.Event()
@@ -96,8 +97,8 @@ class BossAgent:
             消息列表
         """
         # 获取系统提示词内容（按需加载文档上下文）
-        if self.document_context is None:
-            self.document_context = self.doc_loader.load()
+        # 每次调用 load() 检查文件修改时间，自动刷新缓存
+        self.document_context = self.doc_loader.load()
         system_content = self.prompt_loader.build_system_content(self.document_context)
         scheduler_status = self.scheduler.get_status()
         if scheduler_status.get("active"):

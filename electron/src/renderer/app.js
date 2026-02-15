@@ -33,6 +33,7 @@ let polling = false;
 let uiBusy = false;
 let contextMenu = null;
 let contextMenuTarget = null;
+let lastSchedulerState = null;  // 存储上一次的调度器状态
 const startupDeadline =
   Date.now() + (Number(window.bossApi.startupTimeoutMs) || 30000);
 
@@ -146,8 +147,12 @@ function ensureAssistantMessage(messageId) {
   // messageMap stores the BUBBLE element
   let bubble = messageMap.get(messageId);
   if (!bubble) {
-    bubble = createMessage("assistant", "", { messageId });
-    messageMap.set(messageId, bubble);
+    // 尝试从 DOM 中查找现有的 assistant 气泡
+    bubble = messagesEl.querySelector(`.message-bubble[data-message-id="${messageId}"]`);
+    if (!bubble) {
+      bubble = createMessage("assistant", "", { messageId });
+      messageMap.set(messageId, bubble);
+    }
   }
   return bubble;
 }
@@ -436,6 +441,9 @@ function handleStreamEvent(event, fallbackMessageId) {
     }
     setStatus("已连接");
     setUiBusy(false);
+    // 清理已完成的 messageMap 条目
+    messageMap.delete(messageId);
+    toolRowsByMessageId.delete(messageId);
     if (event.saved && event.record_index !== undefined && event.record_index !== null) {
       const recordIndex = event.record_index;
       const assistantBubble = messageMap.get(messageId);
@@ -922,7 +930,12 @@ async function pollEvents() {
         }
       });
     }
-    await loadScheduler();
+    // 主动获取最新调度器状态并对比
+    const currentData = await apiFetch("/scheduler");
+    if (JSON.stringify(currentData) !== JSON.stringify(lastSchedulerState)) {
+      renderScheduler(currentData);
+      lastSchedulerState = currentData;
+    }
   } catch (err) {
     if (isTimeoutText(String(err))) {
       if (isStartingUp()) {
